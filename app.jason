@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Football Live Alerts",
+    "slug": "football-live-alerts",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "footballlivealerts",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.kostasstam1277.footballlivealerts"
+    },
+    "android": {
+      "package": "com.kostasstam1277.footballlivealerts"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-notifications"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
