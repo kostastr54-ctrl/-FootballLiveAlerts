@@ -1,9 +1,11 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
   RefreshControl,
   SafeAreaView,
+  ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   View,
@@ -17,487 +19,932 @@ const REFRESH_MS = 30000;
 type Team = {
   id?: string | number;
   name?: string;
+  logo?: string;
 };
 
 type StatsSide = {
-  home?: number;
-  away?: number;
+  attacks?: number;
+  dangerous_attacks?: number;
+  shots?: number;
+  shots_on_target?: number;
+  shots_off_target?: number;
+  corners?: number;
+  possession?: number;
 };
 
 type Statistics = {
-  attacks?: StatsSide;
-  dangerous_attacks?: StatsSide;
-  shots?: StatsSide;
-  shots_on_target?: StatsSide;
-  corners?: StatsSide;
+  attacks?: {
+    home?: number;
+    away?: number;
+  };
+  dangerous_attacks?: {
+    home?: number;
+    away?: number;
+  };
+  shots?: {
+    home?: number;
+    away?: number;
+  };
+  shots_on_target?: {
+    home?: number;
+    away?: number;
+  };
+  shots_off_target?: {
+    home?: number;
+    away?: number;
+  };
+  corners?: {
+    home?: number;
+    away?: number;
+  };
+  possession?: {
+    home?: number;
+    away?: number;
+  };
+  home?: StatsSide;
+  away?: StatsSide;
 };
 
 type Match = {
   id?: string | number;
   fixture_id?: string | number;
-
   minute?: number | string;
   elapsed?: number | string;
-
   status?: string;
+  state?: string;
+  live?: boolean;
+
+  home?: Team;
+  away?: Team;
 
   teams?: {
     home?: Team;
     away?: Team;
   };
 
-  score?: {
-    home?: number;
-    away?: number;
-  };
+  home_team?: Team;
+  away_team?: Team;
 
   goals?: {
-    home?: number;
-    away?: number;
+    home?: number | string;
+    away?: number | string;
+  };
+
+  score?: {
+    home?: number | string;
+    away?: number | string;
   };
 
   statistics?: Statistics;
 
+  stats?: Statistics;
+
+  corners?: {
+    home?: number | string;
+    away?: number | string;
+  };
+
+  pressure?: {
+    team?: string;
+    side?: string;
+    passed?: boolean;
+    dangerous_attacks?: number;
+    attacks?: number;
+    shots?: number;
+    shots_on_target?: number;
+    corners?: number;
+    window?: string;
+  };
+
   alert?: boolean;
-  alert_team?: "home" | "away";
-  alert_window?: string;
-  all_criteria_passed?: boolean;
+  alert_triggered?: boolean;
+  criteria_passed?: boolean;
+  window?: string;
 };
 
 type ApiResponse = {
   ok?: boolean;
-  live_matches?: Match[];
+  error?: string;
+  message?: string;
+
+  checked_at?: string;
+
+  live_matches?: number | Match[];
+
   matches?: Match[];
+
   data?: Match[];
+
+  result?: {
+    live_matches?: number | Match[];
+    matches?: Match[];
+    data?: Match[];
+    results?: Match[];
+    checked_at?: string;
+    skipped?: boolean;
+    reason?: string;
+    wait_seconds?: number;
+  };
+
+  results?: Match[];
+};
+
+type SideStats = {
+  attacks: number;
+  dangerousAttacks: number;
+  shots: number;
+  shotsOnTarget: number;
+  corners: number;
+  possession: number;
+};
+
+type Pressure = {
+  side: "home" | "away" | null;
+  team: string;
+  passed: boolean;
+  window: string;
 };
 
 function numberValue(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return 0;
 }
 
 function minuteOf(match: Match): number {
   return numberValue(match.minute ?? match.elapsed);
 }
 
+function getHome(match: Match): Team {
+  return (
+    match.home ??
+    match.teams?.home ??
+    match.home_team ??
+    {}
+  );
+}
+
+function getAway(match: Match): Team {
+  return (
+    match.away ??
+    match.teams?.away ??
+    match.away_team ??
+    {}
+  );
+}
+
 function homeName(match: Match): string {
-  return match.teams?.home?.name ?? "Home";
+  return getHome(match).name || "Home";
 }
 
 function awayName(match: Match): string {
-  return match.teams?.away?.name ?? "Away";
+  return getAway(match).name || "Away";
+}
+
+function homeId(match: Match): string {
+  return String(getHome(match).id ?? "");
+}
+
+function awayId(match: Match): string {
+  return String(getAway(match).id ?? "");
+}
+
+function matchId(match: Match): string {
+  return String(match.id ?? match.fixture_id ?? "");
 }
 
 function homeScore(match: Match): number {
   return numberValue(
-    match.score?.home ?? match.goals?.home
+    match.goals?.home ??
+      match.score?.home
   );
 }
 
 function awayScore(match: Match): number {
   return numberValue(
-    match.score?.away ?? match.goals?.away
+    match.goals?.away ??
+      match.score?.away
   );
 }
 
-function statsOf(match: Match) {
-  const s = match.statistics ?? {};
+function getStats(match: Match): Statistics {
+  return match.statistics ?? match.stats ?? {};
+}
+
+function getSideStats(
+  match: Match,
+  side: "home" | "away"
+): SideStats {
+  const stats = getStats(match);
+  const direct = side === "home" ? stats.home : stats.away;
+
+  const attacks =
+    direct?.attacks ??
+    stats.attacks?.[side] ??
+    0;
+
+  const dangerousAttacks =
+    direct?.dangerous_attacks ??
+    stats.dangerous_attacks?.[side] ??
+    0;
+
+  const shots =
+    direct?.shots ??
+    stats.shots?.[side] ??
+    numberValue(direct?.shots_on_target) +
+      numberValue(direct?.shots_off_target);
+
+  const shotsOnTarget =
+    direct?.shots_on_target ??
+    stats.shots_on_target?.[side] ??
+    0;
+
+  const corners =
+    direct?.corners ??
+    numberValue(match.corners?.[side]) ??
+    stats.corners?.[side] ??
+    0;
+
+  const possession =
+    direct?.possession ??
+    stats.possession?.[side] ??
+    0;
 
   return {
-    attacksHome: numberValue(s.attacks?.home),
-    attacksAway: numberValue(s.attacks?.away),
-
-    dangerousHome: numberValue(
-      s.dangerous_attacks?.home
-    ),
-    dangerousAway: numberValue(
-      s.dangerous_attacks?.away
-    ),
-
-    shotsHome: numberValue(s.shots?.home),
-    shotsAway: numberValue(s.shots?.away),
-
-    shotsTargetHome: numberValue(
-      s.shots_on_target?.home
-    ),
-    shotsTargetAway: numberValue(
-      s.shots_on_target?.away
-    ),
-
-    cornersHome: numberValue(
-      s.corners?.home
-    ),
-    cornersAway: numberValue(
-      s.corners?.away
-    ),
+    attacks: numberValue(attacks),
+    dangerousAttacks: numberValue(dangerousAttacks),
+    shots: numberValue(shots),
+    shotsOnTarget: numberValue(shotsOnTarget),
+    corners: numberValue(corners),
+    possession: numberValue(possession),
   };
 }
 
-function teamPassed(
-  dangerous: number,
-  shots: number,
-  shotsTarget: number,
-  corners: number,
-  minute: number
+function isLive(match: Match): boolean {
+  if (match.live === true) {
+    return true;
+  }
+
+  const status = String(
+    match.status ?? match.state ?? ""
+  ).toLowerCase();
+
+  const liveStatuses = [
+    "live",
+    "in_play",
+    "inplay",
+    "1h",
+    "2h",
+    "ht",
+    "extra_time",
+    "et",
+    "penalties",
+    "first_half",
+    "second_half",
+  ];
+
+  if (liveStatuses.includes(status)) {
+    return true;
+  }
+
+  const minute = minuteOf(match);
+
+  return (
+    minute > 0 &&
+    minute <= 130 &&
+    ![
+      "finished",
+      "ft",
+      "ended",
+      "cancelled",
+      "postponed",
+      "scheduled",
+      "not_started",
+    ].includes(status)
+  );
+}
+
+function pressureFor(
+  match: Match,
+  side: "home" | "away"
 ): boolean {
+  const minute = minuteOf(match);
+  const stats = getSideStats(match, side);
+
   if (minute >= 25 && minute <= 45) {
     return (
-      dangerous >= 20 &&
-      shots >= 8 &&
-      shotsTarget >= 4 &&
-      corners >= 4
+      stats.dangerousAttacks >= 20 &&
+      stats.shots >= 8 &&
+      stats.shotsOnTarget >= 4 &&
+      stats.corners >= 4
     );
   }
 
-  if (minute >= 65 && minute <= 120) {
+  if (minute >= 65 && minute <= 130) {
     return (
-      dangerous >= 60 &&
-      shots >= 12 &&
-      shotsTarget >= 5 &&
-      corners >= 6
+      stats.dangerousAttacks >= 60 &&
+      stats.shots >= 12 &&
+      stats.shotsOnTarget >= 5 &&
+      stats.corners >= 6
     );
   }
 
   return false;
 }
 
-function pressureInfo(match: Match) {
+function pressureWindow(minute: number): string {
+  if (minute >= 25 && minute <= 45) {
+    return "25′–45′";
+  }
+
+  if (minute >= 65 && minute <= 130) {
+    return "65′–90′+";
+  }
+
+  return "OUTSIDE ALERT WINDOW";
+}
+
+function getPressure(match: Match): Pressure {
   const minute = minuteOf(match);
-  const s = statsOf(match);
 
-  const homePassed = teamPassed(
-    s.dangerousHome,
-    s.shotsHome,
-    s.shotsTargetHome,
-    s.cornersHome,
-    minute
-  );
+  if (
+    minute < 25 ||
+    (minute > 45 && minute < 65)
+  ) {
+    return {
+      side: null,
+      team: "",
+      passed: false,
+      window: pressureWindow(minute),
+    };
+  }
 
-  const awayPassed = teamPassed(
-    s.dangerousAway,
-    s.shotsAway,
-    s.shotsTargetAway,
-    s.cornersAway,
-    minute
-  );
+  const homePassed = pressureFor(match, "home");
+  const awayPassed = pressureFor(match, "away");
 
   if (homePassed) {
     return {
-      passed: true,
+      side: "home",
       team: homeName(match),
-      window:
-        minute >= 25 && minute <= 45
-          ? "25′–45′"
-          : "65′–90′+",
+      passed: true,
+      window: pressureWindow(minute),
     };
   }
 
   if (awayPassed) {
     return {
-      passed: true,
+      side: "away",
       team: awayName(match),
-      window:
-        minute >= 25 && minute <= 45
-          ? "25′–45′"
-          : "65′–90′+",
+      passed: true,
+      window: pressureWindow(minute),
     };
   }
 
   return {
-    passed: false,
+    side: null,
     team: "",
-    window: "",
+    passed: false,
+    window: pressureWindow(minute),
   };
 }
 
-function normalizeMatches(
-  response: ApiResponse
-): Match[] {
-  if (Array.isArray(response.live_matches)) {
-    return response.live_matches;
+function normalizeMatches(payload: ApiResponse): Match[] {
+  const candidates: unknown[] = [];
+
+  if (Array.isArray(payload.matches)) {
+    candidates.push(...payload.matches);
   }
 
-  if (Array.isArray(response.matches)) {
-    return response.matches;
+  if (Array.isArray(payload.data)) {
+    candidates.push(...payload.data);
   }
 
-  if (Array.isArray(response.data)) {
-    return response.data;
+  if (Array.isArray(payload.results)) {
+    candidates.push(...payload.results);
   }
 
-  return [];
-}
-
-export default function HomeScreen() {
-  const [matches, setMatches] = useState<Match[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] =
-    useState(false);
-  const [error, setError] = useState("");
-
-  const loadMatches = useCallback(async () => {
-    try {
-      setError("");
-
-      const response = await fetch(
-        `${WORKER_URL}/run`
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          `HTTP ${response.status}`
-        );
-      }
-
-      const json: ApiResponse =
-        await response.json();
-
-      const liveMatches =
-        normalizeMatches(json);
-
-      setMatches(liveMatches);
-    } catch (error) {
-      console.log(
-        "Football Worker error:",
-        error
-      );
-
-      setError(
-        "Δεν ήταν δυνατή η φόρτωση των live αγώνων."
-      );
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+  if (payload.result) {
+    if (Array.isArray(payload.result.matches)) {
+      candidates.push(...payload.result.matches);
     }
-  }, []);
 
-  useEffect(() => {
-    loadMatches();
+    if (Array.isArray(payload.result.data)) {
+      candidates.push(...payload.result.data);
+    }
 
-    const timer = setInterval(
-      loadMatches,
-      REFRESH_MS
-    );
+    if (Array.isArray(payload.result.results)) {
+      candidates.push(...payload.result.results);
+    }
 
-    return () => clearInterval(timer);
-  }, [loadMatches]);
+    if (Array.isArray(payload.result.live_matches)) {
+      candidates.push(...payload.result.live_matches);
+    }
+  }
 
-  const refresh = () => {
-    setRefreshing(true);
-    loadMatches();
-  };
+  if (Array.isArray(payload.live_matches)) {
+    candidates.push(...payload.live_matches);
+  }
 
-  const renderMatch = ({
-    item,
-  }: {
-    item: Match;
-  }) => {
-    const minute = minuteOf(item);
-    const pressure = pressureInfo(item);
-    const s = statsOf(item);
+  const unique = new Map<string, Match>();
 
-    return (
-      <View
-        style={[
-          styles.card,
-          pressure.passed &&
-            styles.alertCard,
-        ]}
-      >
-        <View style={styles.topRow}>
-          <Text style={styles.live}>
-            ● LIVE
-          </Text>
+  for (const item of candidates) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
 
-          <Text style={styles.minute}>
-            {minute > 0
-              ? `${minute}′`
-              : "LIVE"}
-          </Text>
-        </View>
+    const match = item as Match;
 
-        <View style={styles.teams}>
-          <View style={styles.team}>
-            <Text style={styles.teamName}>
-              {homeName(item)}
-            </Text>
+    if (!isLive(match)) {
+      continue;
+    }
 
-            <Text style={styles.score}>
-              {homeScore(item)}
-            </Text>
-          </View>
+    const id = matchId(match);
 
-          <Text style={styles.dash}>
-            -
-          </Text>
+    if (!id) {
+      continue;
+    }
 
-          <View style={styles.team}>
-            <Text style={styles.teamName}>
-              {awayName(item)}
-            </Text>
+    unique.set(id, match);
+  }
 
-            <Text style={styles.score}>
-              {awayScore(item)}
-            </Text>
-          </View>
-        </View>
+  return Array.from(unique.values());
+}
 
-        {pressure.passed && (
-          <View style={styles.alertBox}>
-            <Text style={styles.alertTitle}>
-              🔥 STRONG PRESSURE
-            </Text>
+async function fetchWorker(): Promise<ApiResponse> {
+  const response = await fetch(`${WORKER_URL}/run`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "Cache-Control": "no-cache",
+    },
+  });
 
-            <Text style={styles.alertTeam}>
-              {pressure.team}
-            </Text>
+  const text = await response.text();
 
-            <Text style={styles.alertWindow}>
-              {pressure.window}
-            </Text>
+  let json: ApiResponse;
 
-            <Text style={styles.alertPassed}>
-              ALL CRITERIA PASSED
-            </Text>
-          </View>
-        )}
-
-        <View style={styles.stats}>
-          <Text style={styles.statTitle}>
-            LIVE STATISTICS
-          </Text>
-
-          <Text style={styles.stat}>
-            ⚡ Dangerous Attacks{" "}
-            {s.dangerousHome} -{" "}
-            {s.dangerousAway}
-          </Text>
-
-          <Text style={styles.stat}>
-            📊 Attacks{" "}
-            {s.attacksHome} -{" "}
-            {s.attacksAway}
-          </Text>
-
-          <Text style={styles.stat}>
-            🎯 Shots{" "}
-            {s.shotsHome} -{" "}
-            {s.shotsAway}
-          </Text>
-
-          <Text style={styles.stat}>
-            🎯 Shots on Target{" "}
-            {s.shotsTargetHome} -{" "}
-            {s.shotsTargetAway}
-          </Text>
-
-          <Text style={styles.stat}>
-            🚩 Corners{" "}
-            {s.cornersHome} -{" "}
-            {s.cornersAway}
-          </Text>
-        </View>
-      </View>
-    );
-  };
-
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.center}>
-          <ActivityIndicator
-            size="large"
-          />
-
-          <Text style={styles.loading}>
-            Φόρτωση live αγώνων...
-          </Text>
-        </View>
-      </SafeAreaView>
+  try {
+    json = JSON.parse(text) as ApiResponse;
+  } catch {
+    throw new Error(
+      `Ο Worker επέστρεψε μη έγκυρη απάντηση (${response.status}).`
     );
   }
+
+  if (!response.ok || json.ok === false) {
+    throw new Error(
+      json.error ||
+        json.message ||
+        `Σφάλμα Worker (${response.status}).`
+    );
+  }
+
+  return json;
+}
+
+function StatsRow({
+  label,
+  home,
+  away,
+}: {
+  label: string;
+  home: number;
+  away: number;
+}) {
+  return (
+    <View style={styles.statRow}>
+      <Text style={styles.statValue}>{home}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+      <Text style={styles.statValue}>{away}</Text>
+    </View>
+  );
+}
+
+function MatchCard({ match }: { match: Match }) {
+  const minute = minuteOf(match);
+  const home = getSideStats(match, "home");
+  const away = getSideStats(match, "away");
+  const pressure = getPressure(match);
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>
-          ⚽ Football Live Alerts
-        </Text>
+    <View style={styles.card}>
+      <View style={styles.liveHeader}>
+        <View style={styles.liveBadge}>
+          <View style={styles.liveDot} />
+          <Text style={styles.liveText}>LIVE</Text>
+        </View>
 
-        <Text style={styles.subtitle}>
-          Live matches • Pressure alerts
+        <Text style={styles.minute}>
+          {minute > 0 ? `${minute}′` : "LIVE"}
         </Text>
       </View>
 
-      {error !== "" && (
-        <View style={styles.errorBox}>
-          <Text style={styles.errorText}>
-            {error}
+      <View style={styles.teamsRow}>
+        <View style={styles.teamBlock}>
+          <Text style={styles.teamName} numberOfLines={2}>
+            {homeName(match)}
+          </Text>
+        </View>
+
+        <View style={styles.scoreBlock}>
+          <Text style={styles.score}>
+            {homeScore(match)} - {awayScore(match)}
+          </Text>
+        </View>
+
+        <View style={styles.teamBlock}>
+          <Text
+            style={[styles.teamName, styles.awayTeam]}
+            numberOfLines={2}
+          >
+            {awayName(match)}
+          </Text>
+        </View>
+      </View>
+
+      {pressure.passed && (
+        <View style={styles.alertBox}>
+          <Text style={styles.alertTitle}>
+            🚨 PRESSURE ALERT
+          </Text>
+
+          <Text style={styles.alertTeam}>
+            {pressure.team}
+          </Text>
+
+          <Text style={styles.alertPassed}>
+            ALL CRITERIA PASSED
+          </Text>
+
+          <Text style={styles.alertWindow}>
+            Window: {pressure.window}
           </Text>
         </View>
       )}
 
-      {!error &&
-        matches.length === 0 && (
-          <View style={styles.center}>
-            <Text style={styles.emptyTitle}>
-              Δεν υπάρχουν live αγώνες
-            </Text>
+      <View style={styles.statsBox}>
+        <Text style={styles.statsTitle}>
+          MATCH STATISTICS
+        </Text>
 
-            <Text style={styles.emptyText}>
-              Θα γίνει αυτόματη ανανέωση.
+        <StatsRow
+          label="Attacks"
+          home={home.attacks}
+          away={away.attacks}
+        />
+
+        <StatsRow
+          label="Dangerous Attacks"
+          home={home.dangerousAttacks}
+          away={away.dangerousAttacks}
+        />
+
+        <StatsRow
+          label="Shots"
+          home={home.shots}
+          away={away.shots}
+        />
+
+        <StatsRow
+          label="Shots on Target"
+          home={home.shotsOnTarget}
+          away={away.shotsOnTarget}
+        />
+
+        <StatsRow
+          label="Corners"
+          home={home.corners}
+          away={away.corners}
+        />
+
+        <StatsRow
+          label="Possession %"
+          home={home.possession}
+          away={away.possession}
+        />
+      </View>
+
+      <View style={styles.criteriaBox}>
+        <Text style={styles.criteriaTitle}>
+          ALERT WINDOWS
+        </Text>
+
+        <View style={styles.criteriaRow}>
+          <Text style={styles.criteriaTime}>
+            25′–45′
+          </Text>
+
+          <Text style={styles.criteriaText}>
+            DA ≥20 • Shots ≥8 • SOT ≥4 • Corners ≥4
+          </Text>
+        </View>
+
+        <View style={styles.criteriaRow}>
+          <Text style={styles.criteriaTime}>
+            65′–90′+
+          </Text>
+
+          <Text style={styles.criteriaText}>
+            DA ≥60 • Shots ≥12 • SOT ≥5 • Corners ≥6
+          </Text>
+        </View>
+      </View>
+
+      <Text style={styles.fixtureId}>
+        LIVE ID: {matchId(match)}
+      </Text>
+    </View>
+  );
+}
+
+export default function Index() {
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdate, setLastUpdate] = useState("");
+
+  const loadMatches = useCallback(
+    async (manual = false) => {
+      if (manual) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      try {
+        setError("");
+
+        const payload = await fetchWorker();
+        const liveMatches = normalizeMatches(payload);
+
+        setMatches(liveMatches);
+
+        const checkedAt =
+          payload.checked_at ??
+          payload.result?.checked_at;
+
+        if (checkedAt) {
+          const date = new Date(checkedAt);
+
+          if (!Number.isNaN(date.getTime())) {
+            setLastUpdate(
+              date.toLocaleTimeString("el-GR", {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })
+            );
+          }
+        }
+      } catch (err) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Άγνωστο σφάλμα.";
+
+        setError(
+          `Δεν ήταν δυνατή η φόρτωση των LIVE αγώνων.\n${message}`
+        );
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    loadMatches(false);
+
+    const timer = setInterval(() => {
+      loadMatches(false);
+    }, REFRESH_MS);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [loadMatches]);
+
+  const alertCount = useMemo(() => {
+    return matches.reduce((count, match) => {
+      return count + (getPressure(match).passed ? 1 : 0);
+    }, 0);
+  }, [matches]);
+
+  const renderMatch = useCallback(
+    ({ item }: { item: Match }) => (
+      <MatchCard match={item} />
+    ),
+    []
+  );
+
+  return (
+    <SafeAreaView style={styles.safe}>
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor="#050505"
+      />
+
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <Text style={styles.title}>
+            ⚽ Football Live Alerts
+          </Text>
+
+          <Text style={styles.subtitle}>
+            LIVE matches • Pressure alerts
+          </Text>
+
+          <View style={styles.headerStats}>
+            <View style={styles.headerStat}>
+              <Text style={styles.headerNumber}>
+                {matches.length}
+              </Text>
+
+              <Text style={styles.headerLabel}>
+                LIVE
+              </Text>
+            </View>
+
+            <View style={styles.headerStat}>
+              <Text style={styles.headerNumber}>
+                {alertCount}
+              </Text>
+
+              <Text style={styles.headerLabel}>
+                ALERTS
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {loading && matches.length === 0 ? (
+          <View style={styles.center}>
+            <ActivityIndicator size="large" />
+
+            <Text style={styles.loadingText}>
+              Φόρτωση LIVE αγώνων...
             </Text>
           </View>
+        ) : error && matches.length === 0 ? (
+          <ScrollView
+            contentContainerStyle={styles.centerScroll}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => loadMatches(true)}
+              />
+            }
+          >
+            <View style={styles.errorBox}>
+              <Text style={styles.errorIcon}>⚠️</Text>
+
+              <Text style={styles.errorTitle}>
+                Σφάλμα σύνδεσης
+              </Text>
+
+              <Text style={styles.errorText}>
+                {error}
+              </Text>
+
+              <Text style={styles.retryText}>
+                Κάνε pull down για νέα προσπάθεια.
+              </Text>
+            </View>
+          </ScrollView>
+        ) : matches.length === 0 ? (
+          <ScrollView
+            contentContainerStyle={styles.centerScroll}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => loadMatches(true)}
+              />
+            }
+          >
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyIcon}>
+                🔴
+              </Text>
+
+              <Text style={styles.emptyTitle}>
+                NO LIVE MATCHES
+              </Text>
+
+              <Text style={styles.emptyText}>
+                Δεν υπάρχουν αυτή τη στιγμή
+                ζωντανοί αγώνες.
+              </Text>
+
+              <Text style={styles.emptySubtext}>
+                Η εφαρμογή εμφανίζει αποκλειστικά
+                LIVE αγώνες.
+              </Text>
+            </View>
+          </ScrollView>
+        ) : (
+          <FlatList
+            data={matches}
+            keyExtractor={(item, index) =>
+              `${matchId(item)}-${index}`
+            }
+            renderItem={renderMatch}
+            contentContainerStyle={styles.list}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => loadMatches(true)}
+              />
+            }
+            showsVerticalScrollIndicator={false}
+          />
         )}
 
-      {matches.length > 0 && (
-        <FlatList
-          data={matches}
-          keyExtractor={(item, index) =>
-            String(
-              item.id ??
-                item.fixture_id ??
-                index
-            )
-          }
-          renderItem={renderMatch}
-          contentContainerStyle={
-            styles.list
-          }
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={refresh}
-            />
-          }
-        />
-      )}
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>
+            Auto refresh: 30s
+          </Text>
+
+          {lastUpdate ? (
+            <Text style={styles.footerText}>
+              Updated: {lastUpdate}
+            </Text>
+          ) : null}
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safe: {
+    flex: 1,
+    backgroundColor: "#050505",
+  },
+
   container: {
     flex: 1,
-    backgroundColor: "#0B0F14",
+    backgroundColor: "#050505",
   },
 
   header: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 18,
     paddingTop: 18,
-    paddingBottom: 12,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: "#202020",
   },
 
   title: {
-    color: "#FFFFFF",
+    color: "#ffffff",
     fontSize: 25,
     fontWeight: "800",
   },
 
   subtitle: {
-    color: "#8D99A6",
+    color: "#999999",
     fontSize: 14,
     marginTop: 5,
+  },
+
+  headerStats: {
+    flexDirection: "row",
+    marginTop: 15,
+    gap: 10,
+  },
+
+  headerStat: {
+    backgroundColor: "#111111",
+    borderWidth: 1,
+    borderColor: "#242424",
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 18,
+    alignItems: "center",
+    minWidth: 85,
+  },
+
+  headerNumber: {
+    color: "#ffffff",
+    fontSize: 19,
+    fontWeight: "800",
+  },
+
+  headerLabel: {
+    color: "#888888",
+    fontSize: 10,
+    marginTop: 2,
+    fontWeight: "700",
   },
 
   list: {
@@ -506,122 +953,193 @@ const styles = StyleSheet.create({
   },
 
   card: {
-    backgroundColor: "#151B23",
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 14,
+    backgroundColor: "#0d0d0d",
     borderWidth: 1,
-    borderColor: "#27313D",
+    borderColor: "#252525",
+    borderRadius: 18,
+    padding: 15,
+    marginBottom: 14,
   },
 
-  alertCard: {
-    borderWidth: 2,
-    borderColor: "#FF8A00",
-  },
-
-  topRow: {
+  liveHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 12,
+    alignItems: "center",
+    marginBottom: 14,
   },
 
-  live: {
-    color: "#FF4D4D",
-    fontSize: 13,
+  liveBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#210b0b",
+    borderWidth: 1,
+    borderColor: "#8c2020",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+  },
+
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: "#ff3030",
+    marginRight: 6,
+  },
+
+  liveText: {
+    color: "#ff5555",
+    fontSize: 12,
     fontWeight: "900",
   },
 
   minute: {
-    color: "#FFFFFF",
-    fontSize: 15,
+    color: "#ffffff",
+    fontSize: 18,
     fontWeight: "800",
   },
 
-  teams: {
+  teamsRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    marginBottom: 16,
   },
 
-  team: {
+  teamBlock: {
     flex: 1,
-    alignItems: "center",
   },
 
   teamName: {
-    color: "#FFFFFF",
+    color: "#ffffff",
     fontSize: 15,
     fontWeight: "700",
-    textAlign: "center",
+  },
+
+  awayTeam: {
+    textAlign: "right",
+  },
+
+  scoreBlock: {
+    paddingHorizontal: 12,
+    alignItems: "center",
   },
 
   score: {
-    color: "#FFFFFF",
-    fontSize: 30,
+    color: "#ffffff",
+    fontSize: 25,
     fontWeight: "900",
-    marginTop: 5,
-  },
-
-  dash: {
-    color: "#697582",
-    fontSize: 24,
-    paddingHorizontal: 8,
-  },
-
-  stats: {
-    marginTop: 15,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: "#27313D",
-  },
-
-  statTitle: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "900",
-    marginBottom: 9,
-  },
-
-  stat: {
-    color: "#C2CBD5",
-    fontSize: 13,
-    marginBottom: 7,
   },
 
   alertBox: {
-    marginTop: 14,
-    padding: 13,
-    borderRadius: 12,
-    alignItems: "center",
-    backgroundColor: "#3A2108",
+    backgroundColor: "#241000",
     borderWidth: 1,
-    borderColor: "#FF8A00",
+    borderColor: "#ff7a00",
+    borderRadius: 13,
+    padding: 12,
+    marginBottom: 13,
   },
 
   alertTitle: {
-    color: "#FFB347",
-    fontSize: 17,
+    color: "#ff9d3d",
+    fontSize: 14,
     fontWeight: "900",
   },
 
   alertTeam: {
-    color: "#FFFFFF",
-    fontSize: 15,
-    fontWeight: "800",
-    marginTop: 4,
-  },
-
-  alertWindow: {
-    color: "#FFB347",
-    fontSize: 13,
+    color: "#ffffff",
+    fontSize: 18,
+    fontWeight: "900",
     marginTop: 3,
   },
 
   alertPassed: {
-    color: "#FFFFFF",
+    color: "#64ff8a",
+    fontSize: 12,
+    fontWeight: "900",
+    marginTop: 4,
+  },
+
+  alertWindow: {
+    color: "#bbbbbb",
+    fontSize: 11,
+    marginTop: 3,
+  },
+
+  statsBox: {
+    backgroundColor: "#111111",
+    borderRadius: 13,
+    padding: 11,
+  },
+
+  statsTitle: {
+    color: "#777777",
+    fontSize: 10,
+    fontWeight: "800",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+
+  statRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 7,
+    borderTopWidth: 1,
+    borderTopColor: "#1e1e1e",
+  },
+
+  statValue: {
+    width: 50,
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+
+  statLabel: {
+    flex: 1,
+    color: "#999999",
+    fontSize: 12,
+    textAlign: "center",
+  },
+
+  criteriaBox: {
+    marginTop: 12,
+    backgroundColor: "#0a0a0a",
+    borderRadius: 12,
+    padding: 11,
+  },
+
+  criteriaTitle: {
+    color: "#777777",
+    fontSize: 10,
+    fontWeight: "800",
+    marginBottom: 7,
+  },
+
+  criteriaRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginTop: 5,
+  },
+
+  criteriaTime: {
+    width: 75,
+    color: "#ffffff",
     fontSize: 11,
     fontWeight: "800",
-    marginTop: 5,
+  },
+
+  criteriaText: {
+    flex: 1,
+    color: "#777777",
+    fontSize: 10,
+    lineHeight: 15,
+  },
+
+  fixtureId: {
+    color: "#444444",
+    fontSize: 9,
+    marginTop: 9,
   },
 
   center: {
@@ -631,36 +1149,105 @@ const styles = StyleSheet.create({
     padding: 25,
   },
 
-  loading: {
-    color: "#AAB4BF",
+  centerScroll: {
+    flexGrow: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 25,
+  },
+
+  loadingText: {
+    color: "#999999",
     marginTop: 12,
-    fontSize: 15,
+    fontSize: 14,
+  },
+
+  emptyBox: {
+    width: "100%",
+    maxWidth: 380,
+    backgroundColor: "#0d0d0d",
+    borderWidth: 1,
+    borderColor: "#252525",
+    borderRadius: 20,
+    padding: 28,
+    alignItems: "center",
+  },
+
+  emptyIcon: {
+    fontSize: 40,
+    marginBottom: 12,
   },
 
   emptyTitle: {
-    color: "#FFFFFF",
-    fontSize: 20,
-    fontWeight: "800",
-    textAlign: "center",
+    color: "#ffffff",
+    fontSize: 22,
+    fontWeight: "900",
   },
 
   emptyText: {
-    color: "#8995A3",
-    marginTop: 8,
+    color: "#aaaaaa",
+    fontSize: 14,
     textAlign: "center",
+    marginTop: 10,
+    lineHeight: 21,
+  },
+
+  emptySubtext: {
+    color: "#666666",
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 10,
   },
 
   errorBox: {
-    margin: 14,
-    padding: 14,
-    borderRadius: 12,
-    backgroundColor: "#35151A",
+    width: "100%",
+    maxWidth: 390,
+    backgroundColor: "#160909",
     borderWidth: 1,
-    borderColor: "#8F303A",
+    borderColor: "#7d2525",
+    borderRadius: 18,
+    padding: 22,
+    alignItems: "center",
+  },
+
+  errorIcon: {
+    fontSize: 35,
+    marginBottom: 10,
+  },
+
+  errorTitle: {
+    color: "#ff6666",
+    fontSize: 20,
+    fontWeight: "900",
   },
 
   errorText: {
-    color: "#FFB8BF",
+    color: "#dddddd",
+    fontSize: 13,
     textAlign: "center",
+    marginTop: 12,
+    lineHeight: 19,
+  },
+
+  retryText: {
+    color: "#777777",
+    fontSize: 11,
+    marginTop: 14,
+    textAlign: "center",
+  },
+
+  footer: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#1b1b1b",
+    backgroundColor: "#080808",
+  },
+
+  footerText: {
+    color: "#555555",
+    fontSize: 10,
   },
 });
